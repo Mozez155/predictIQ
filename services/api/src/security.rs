@@ -13,6 +13,7 @@ use axum::{
     response::{IntoResponse, Response},
     Json,
 };
+use ipnet::IpNet;
 use serde::Serialize;
 use tokio::sync::RwLock;
 
@@ -100,13 +101,40 @@ impl Default for RateLimiter {
 }
 
 /// Extract client IP with trusted proxy CIDR validation.
-/// Only trust x-forwarded-for/x-real-ip if the remote address is in a trusted proxy CIDR.
+///
+/// Headers (`x-forwarded-for`, `x-real-ip`) are only trusted when:
+/// - `trusted_cidrs` is non-empty AND the connecting socket address falls
+///   within one of the configured CIDRs, OR
+/// - `trusted_cidrs` is empty AND `trust_proxy` is `true` (legacy mode).
+///
+/// Pass `trusted_cidrs = &[]` and `trust_proxy = false` to always use the
+/// raw socket address (safe for direct-to-internet deployments).
 pub fn extract_client_ip(
     headers: &HeaderMap,
     connect_info: Option<&ConnectInfo<std::net::SocketAddr>>,
     trust_proxy: bool,
 ) -> String {
-    let proxy_trusted = trust_proxy;
+    extract_client_ip_cidrs(headers, connect_info, trust_proxy, &[])
+}
+
+/// CIDR-aware variant. When `trusted_cidrs` is non-empty the connecting IP
+/// must be contained in one of the CIDRs before proxy headers are trusted.
+/// When `trusted_cidrs` is empty, falls back to the `trust_proxy` boolean.
+pub fn extract_client_ip_cidrs(
+    headers: &HeaderMap,
+    connect_info: Option<&ConnectInfo<std::net::SocketAddr>>,
+    trust_proxy: bool,
+    trusted_cidrs: &[IpNet],
+) -> String {
+    let proxy_trusted = if !trusted_cidrs.is_empty() {
+        // Only trust headers if the connecting IP is in a trusted CIDR.
+        connect_info
+            .and_then(|ci| ci.0.ip().to_string().parse::<IpAddr>().ok())
+            .map(|connecting_ip| trusted_cidrs.iter().any(|cidr| cidr.contains(&connecting_ip)))
+            .unwrap_or(false)
+    } else {
+        trust_proxy
+    };
 
     if proxy_trusted {
         // 1. Check X-Forwarded-For header (from proxy/load balancer)
@@ -539,6 +567,7 @@ impl IntoResponse for SecurityError {
 mod tests {
     use super::*;
     use axum::http::HeaderMap;
+    use ipnet::IpNet;
     use std::net::SocketAddr;
 
     // ── helpers ──────────────────────────────────────────────────────────────
@@ -693,6 +722,44 @@ mod tests {
         );
 
         assert_eq!(extract_client_ip(&headers, None, false), "unknown");
+    }
+
+    // ── #454: CIDR-based trusted proxy tests ─────────────────────────────
+
+    /// When the connecting IP is in a trusted CIDR, XFF is trusted.
+    #[test]
+    fn cidr_trusted_proxy_xff_used_when_connecting_ip_in_cidr() {
+        let headers = xff("5.6.7.8");
+        let ci = addr("10.0.0.1:1234"); // in 10.0.0.0/8
+        let cidrs: Vec<IpNet> = vec!["10.0.0.0/8".parse().unwrap()];
+        assert_eq!(
+            extract_client_ip_cidrs(&headers, Some(&ci), false, &cidrs),
+            "5.6.7.8"
+        );
+    }
+
+    /// When the connecting IP is NOT in any trusted CIDR, XFF is ignored.
+    #[test]
+    fn cidr_trusted_proxy_xff_ignored_when_connecting_ip_not_in_cidr() {
+        let headers = xff("9.9.9.9");
+        let ci = addr("1.2.3.4:1234"); // not in 10.0.0.0/8
+        let cidrs: Vec<IpNet> = vec!["10.0.0.0/8".parse().unwrap()];
+        assert_eq!(
+            extract_client_ip_cidrs(&headers, Some(&ci), false, &cidrs),
+            "1.2.3.4",
+            "XFF must be ignored when connecting IP is not in trusted CIDR"
+        );
+    }
+
+    /// Empty CIDR list falls back to the trust_proxy boolean.
+    #[test]
+    fn empty_cidr_list_falls_back_to_trust_proxy_bool() {
+        let headers = xff("5.6.7.8");
+        let ci = addr("1.2.3.4:1234");
+        // trust_proxy=true, no CIDRs → trust headers
+        assert_eq!(extract_client_ip_cidrs(&headers, Some(&ci), true, &[]), "5.6.7.8");
+        // trust_proxy=false, no CIDRs → ignore headers
+        assert_eq!(extract_client_ip_cidrs(&headers, Some(&ci), false, &[]), "1.2.3.4");
     }
 
     // ── api_key_middleware ────────────────────────────────────────────────

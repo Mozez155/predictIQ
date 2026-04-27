@@ -208,7 +208,7 @@ fn is_disposable_email(email: &str) -> bool {
         .unwrap_or(false)
 }
 
-use crate::security::extract_client_ip;
+use crate::security::extract_client_ip_cidrs;
 
 pub async fn newsletter_subscribe(
     State(state): State<Arc<AppState>>,
@@ -216,10 +216,11 @@ pub async fn newsletter_subscribe(
     connect_info: Option<axum::extract::ConnectInfo<std::net::SocketAddr>>,
     Json(payload): Json<NewsletterSubscribeRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let ip = extract_client_ip(
+    let ip = extract_client_ip_cidrs(
         &headers,
         connect_info.as_ref(),
-        !state.config.trusted_proxy_cidrs.is_empty(),
+        state.config.trust_proxy,
+        &state.config.trusted_proxy_cidrs,
     );
     let allowed = state
         .newsletter_rate_limiter
@@ -432,11 +433,12 @@ pub async fn newsletter_gdpr_export(
     connect_info: Option<axum::extract::ConnectInfo<std::net::SocketAddr>>,
     Query(query): Query<NewsletterExportQuery>,
 ) -> Result<Response, ApiError> {
-    use crate::security::extract_client_ip;
-    let ip = extract_client_ip(
+    use crate::security::extract_client_ip_cidrs;
+    let ip = extract_client_ip_cidrs(
         &headers,
         connect_info.as_ref(),
-        !state.config.trusted_proxy_cidrs.is_empty(),
+        state.config.trust_proxy,
+        &state.config.trusted_proxy_cidrs,
     );
     let allowed_ip = state
         .newsletter_rate_limiter
