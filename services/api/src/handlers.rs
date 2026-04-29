@@ -26,9 +26,10 @@ pub struct ApiError {
 
 impl ApiError {
     pub fn internal(err: anyhow::Error) -> Self {
+        tracing::error!(error = %err, "internal server error");
         Self {
             code: "INTERNAL_ERROR",
-            message: err.to_string(),
+            message: "An internal error occurred.".to_string(),
             status: StatusCode::INTERNAL_SERVER_ERROR,
         }
     }
@@ -703,20 +704,13 @@ pub async fn resolve_market(
     State(state): State<Arc<AppState>>,
     Path(market_id): Path<i64>,
     Json(payload): Json<ResolveMarketRequest>,
-) -> Result<impl IntoResponse, (StatusCode, Json<ApiError>)> {
-    let map_err = |e: anyhow::Error| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ApiError { code: "INTERNAL_ERROR", message: e.to_string(), status: StatusCode::INTERNAL_SERVER_ERROR }),
-        )
-    };
-
+) -> Result<impl IntoResponse, ApiError> {
     // 1. Persist the resolution to the database.
     state
         .db
         .resolve_market(market_id, payload.outcome_index)
         .await
-        .map_err(map_err)?;
+        .map_err(into_api_error)?;
 
     // 2. Invalidate only the keys affected by this market's resolution via tag.
     let tag = InvalidationTag::MarketResolved {
@@ -724,7 +718,7 @@ pub async fn resolve_market(
         network: state.config.network_name().to_owned(),
         featured_limit: state.config.featured_limit,
     };
-    let invalidated = state.cache.invalidate_tag(&tag).await.map_err(map_err)?;
+    let invalidated = state.cache.invalidate_tag(&tag).await.map_err(into_api_error)?;
 
     state
         .metrics
