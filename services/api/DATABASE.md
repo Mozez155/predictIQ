@@ -34,6 +34,7 @@ This service uses PostgreSQL. Schema and seed scripts are in:
 | 010a | `010_add_soft_delete_newsletter.sql` | Adds `deleted_at` to `newsletter_subscribers` |
 | 010b | `010_create_audit_log.sql` | Append-only `audit_log` table (bigserial PK) |
 | 011 | `011_create_markets.sql` | `markets` table |
+| 012 | `012_add_performance_indexes.sql` | Composite indexes on `markets` and `content` (promoted from `sql/`) |
 
 > **Note:** Two migration files share the `010_` prefix. Apply them in lexicographic
 > order (`010_add_soft_delete_newsletter.sql` before `010_create_audit_log.sql`).
@@ -122,6 +123,17 @@ Only in **development or staging** when data loss is acceptable:
 psql "$DATABASE_URL" -c "DROP SCHEMA public CASCADE; CREATE SCHEMA public;"
 bash services/api/scripts/run_migrations.sh
 ```
+
+## sql/ Directory
+
+`services/api/sql/` contains **query templates and ad-hoc reference SQL** — not schema migrations.
+
+| File | Purpose |
+|---|---|
+| `performance_indexes.sql` | Source for the indexes now in `012_add_performance_indexes.sql`. Kept as a reference; do not apply manually. |
+| `newsletter_schema.sql` | Early draft of the `newsletter_subscribers` schema. Superseded by `002_create_newsletter_subscriptions.sql`. Do not apply manually. |
+
+> **Rule:** No schema-altering SQL should be applied from `sql/` directly. All schema changes must go through a numbered migration in `database/migrations/`.
 
 ## Connection Pool Configuration
 
