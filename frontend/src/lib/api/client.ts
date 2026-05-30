@@ -3,18 +3,41 @@
  * Run `npm run generate-client` to regenerate `schema.d.ts` after API changes.
  */
 
-import { getEnvConfig } from './env';
+import { getEnvConfig } from '../env';
 import { apiCache, CACHE_TTL } from './cache';
 
 const config = getEnvConfig();
-const BASE_URL = config.apiUrl.replace(/\/$/, "");
+const BASE_URL = config.NEXT_PUBLIC_API_URL.replace(/\/$/, "");
 
 type HttpMethod = "GET" | "POST" | "DELETE";
+
+const DEFAULT_RETRY_CONFIG: RetryConfig = {
+  maxRetries: 3,
+  initialDelayMs: 100,
+  maxDelayMs: 10000,
+};
+
+function getRetryDelay(attempt: number, retryAfter?: number): number {
+  if (retryAfter) return retryAfter * 1000;
+  const delay = DEFAULT_RETRY_CONFIG.initialDelayMs * Math.pow(2, attempt);
+  return Math.min(delay, DEFAULT_RETRY_CONFIG.maxDelayMs);
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
 
 interface RequestOptions {
   body?: unknown;
   params?: Record<string, string | number | undefined>;
   cacheTtl?: number;
+  maxRetries?: number;
+}
+
+interface RetryConfig {
+  maxRetries: number;
+  initialDelayMs: number;
+  maxDelayMs: number;
 }
 
 /**
@@ -167,42 +190,73 @@ async function request<T>(
     }
   }
 
-  let res: Response;
-  try {
-    res = await fetch(url, {
-      method,
-      headers: { "Content-Type": "application/json" },
-      body: options.body !== undefined ? JSON.stringify(options.body) : undefined,
-    });
-  } catch (networkErr) {
-    // Network failure (offline, DNS error, CORS, timeout, etc.)
-    const msg = networkErr instanceof Error ? networkErr.message : "Network request failed";
-    throw new ApiError(`Unable to reach the server. Please check your connection. (${msg})`, 0);
+  const maxRetries = options.maxRetries ?? DEFAULT_RETRY_CONFIG.maxRetries;
+  let lastError: Error | null = null;
+
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    try {
+      const res = await fetch(url, {
+        method,
+        headers: { "Content-Type": "application/json" },
+        body: options.body !== undefined ? JSON.stringify(options.body) : undefined,
+      });
+
+      if (!res.ok) {
+        if (res.status === 429) {
+          if (attempt < maxRetries) {
+            const retryAfter = res.headers.get('Retry-After');
+            const delayMs = getRetryDelay(attempt, retryAfter ? parseInt(retryAfter, 10) : undefined);
+            await sleep(delayMs);
+            continue;
+          }
+        }
+
+        let err: any;
+        try {
+          err = await res.json();
+        } catch {
+          err = {};
+        }
+        const message = err?.message ?? res.statusText ?? `HTTP ${res.status}`;
+        const code = err?.code ?? "UNKNOWN_ERROR";
+        const details = err?.details ?? undefined;
+        throw new ApiError(message, res.status, code, details);
+      }
+
+      // 204 / empty body
+      const text = await res.text();
+      const data = text ? (JSON.parse(text) as T) : (undefined as unknown as T);
+
+      // Cache GET responses
+      if (method === "GET" && options.cacheTtl) {
+        apiCache.set(url, data, options.cacheTtl);
+      }
+
+      // Invalidate cache on mutations
+      if (method === "POST" || method === "DELETE") {
+        apiCache.invalidateByPattern('.*');
+      }
+
+      return data;
+    } catch (networkErr) {
+      if (networkErr instanceof ApiError) {
+        throw networkErr;
+      }
+
+      lastError = networkErr instanceof Error ? networkErr : new Error(String(networkErr));
+      
+      if (attempt < maxRetries && method === "GET") {
+        const delayMs = getRetryDelay(attempt);
+        await sleep(delayMs);
+        continue;
+      }
+
+      const msg = lastError.message;
+      throw new ApiError(`Unable to reach the server. Please check your connection. (${msg})`, 0);
+    }
   }
 
-  if (!res.ok) {
-    const err = await res.json().catch(() => ({ message: res.statusText }));
-    const message = err?.message ?? `HTTP ${res.status}`;
-    const code = err?.code ?? "UNKNOWN_ERROR";
-    const details = err?.details ?? undefined;
-    throw new ApiError(message, res.status, code, details);
-  }
-
-  // 204 / empty body
-  const text = await res.text();
-  const data = text ? (JSON.parse(text) as T) : (undefined as unknown as T);
-
-  // Cache GET responses
-  if (method === "GET" && options.cacheTtl) {
-    apiCache.set(url, data, options.cacheTtl);
-  }
-
-  // Invalidate cache on mutations
-  if (method === "POST" || method === "DELETE") {
-    apiCache.invalidateByPattern('.*');
-  }
-
-  return data;
+  throw lastError || new ApiError("Request failed after retries", 0);
 }
 
 // ---------------------------------------------------------------------------
