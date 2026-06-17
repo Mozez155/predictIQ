@@ -53,10 +53,17 @@ impl IpRateLimiter {
     /// Uses an atomic Redis Lua script so the counter is consistent across
     /// all instances. Fails open (returns `true`) if Redis is unavailable.
     pub async fn allow(&self, key: &str, max_requests: usize, window: Duration) -> bool {
-        let redis_key = format!("newsletter:ratelimit:{key}");
+        let redis_key = format!("newsletter:ratelimit:v1:{key}");
         match self.cache.incr_with_ttl(&redis_key, window).await {
             Ok(count) => count as usize <= max_requests,
-            Err(_) => true, // fail open if Redis is unavailable
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    key,
+                    "newsletter rate limiter Redis error; failing open to avoid blocking subscribers"
+                );
+                true
+            }
         }
     }
 }
