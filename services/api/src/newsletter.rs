@@ -128,7 +128,7 @@ impl TokenStore {
             return ConfirmResult::InvalidOrExpired;
         };
 
-        let entry = self.pending.remove(&email).unwrap();
+        let entry = self.pending.remove(&email).expect("email was found in pending map immediately above");
 
         if Instant::now() > entry.expires_at {
             return ConfirmResult::InvalidOrExpired;
