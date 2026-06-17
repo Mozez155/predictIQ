@@ -185,4 +185,15 @@ mod tests {
         assert_eq!(cfg.window_seconds,  60);
         assert!(!cfg.key_prefix.is_empty());
     }
+
+    #[test]
+    fn rate_limit_state_metrics_field_is_optional() {
+        let state = RateLimitState {
+            redis:   std::sync::Arc::new(deadpool_redis::Config::from_url("redis://127.0.0.1")
+                .create_pool(Some(deadpool_redis::Runtime::Tokio1)).unwrap()),
+            config:  RateLimitConfig::default(),
+            metrics: None,
+        };
+        assert!(state.metrics.is_none());
+    }
 }
